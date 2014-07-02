@@ -69,7 +69,7 @@
 
 #define IDX_FINGER			3
 #define MAX_FINGER_SIZE          31
-#define MAX_FINGER_PRESSURE  255
+#define MAX_FINGER_PRESSURE  65535
 
 #define ABS_MT_POSITION         0x2a    /* Group a set of X and Y */
 #define ABS_MT_AMPLITUDE        0x2b    /* Group a set of Z and W */
@@ -141,6 +141,8 @@ static atomic_t touch_char_available = ATOMIC_INIT(1);
 	#define PROC_FS_MAX_LEN	8
 	static struct proc_dir_entry *dbgProcFile;
 #endif
+
+#define ELAN_I2C_RETRY 10
 
 struct elan_ktf3k_ts_data {
 	struct i2c_client *client;
@@ -991,11 +993,11 @@ static int elan_ktf3k_ts_get_data(struct i2c_client *client, uint8_t *cmd,
 
 static int elan_ktf3k_ts_read_command(struct i2c_client *client,
 			   u8* cmd, u16 cmd_length, u8 *value, u16 value_length){
-       struct i2c_adapter *adapter = client->adapter;
+	struct i2c_adapter *adapter = client->adapter;
 	struct i2c_msg msg[2];
 	//__le16 le_addr;
 	struct elan_ktf3k_ts_data *ts;
-	int length = 0;
+	int retry = 0;
 
 	ts = i2c_get_clientdata(client);
 
@@ -1004,23 +1006,28 @@ static int elan_ktf3k_ts_read_command(struct i2c_client *client,
 	msg[0].len = cmd_length;
 	msg[0].buf = cmd;
 
-	down(&pSem);
-	length = i2c_transfer(adapter, msg, 1);
-	up(&pSem);
-	
-	if (length == 1) // only send on packet
-		return value_length;
-	else
-		return -EIO;
+	for (retry = 0; retry <= ELAN_I2C_RETRY; retry++) {
+		down(&pSem);
+		if (i2c_transfer(adapter, msg, 1) == 1) {
+			up(&pSem);
+			return value_length;
+		}
+		up(&pSem);
+		if (retry == ELAN_I2C_RETRY) {
+			return -EIO;
+		} else
+			msleep(10);
+	}
+	return 0;
 }
 
 static int elan_ktf3k_i2c_read_packet(struct i2c_client *client, 
 	u8 *value, u16 value_length){
-       struct i2c_adapter *adapter = client->adapter;
+	struct i2c_adapter *adapter = client->adapter;
 	struct i2c_msg msg[1];
 	//__le16 le_addr;
 	struct elan_ktf3k_ts_data *ts;
-	int length = 0;
+	int retry = 0;
 
 	ts = i2c_get_clientdata(client);
 
@@ -1028,14 +1035,20 @@ static int elan_ktf3k_i2c_read_packet(struct i2c_client *client,
 	msg[0].flags = I2C_M_RD;
 	msg[0].len = value_length;
 	msg[0].buf = (u8 *) value;
-	down(&pSem);
-	length = i2c_transfer(adapter, msg, 1);
-	up(&pSem);
-	
-	if (length == 1) // only send on packet
-		return value_length;
-	else
-		return -EIO;
+
+	for (retry = 0; retry <= ELAN_I2C_RETRY; retry++) {
+		down(&pSem);
+		if (i2c_transfer(adapter, msg, 1) == 1) {
+			up(&pSem);
+			return value_length;
+		}
+		up(&pSem);
+		if (retry == ELAN_I2C_RETRY) {
+			return -EIO;
+		} else
+			msleep(10);
+	}
+	return 0;
 }
 
 static int __hello_packet_handler(struct i2c_client *client)
@@ -1351,22 +1364,26 @@ void touch_callback(unsigned cable_status){
 static int elan_ktf3k_ts_recv_data(struct i2c_client *client, uint8_t *buf, int size)
 {
 
-	int rc, bytes_to_recv = size;
+	int retry = 0, bytes_to_recv = size;
 
 	if (buf == NULL)
 		return -EINVAL;
 
 	memset(buf, 0, bytes_to_recv);
-	rc = i2c_master_recv(client, buf, bytes_to_recv);
 
-	if (rc != bytes_to_recv) {
-		dev_err(&client->dev,
-			"[elan] %s: i2c_master_recv error?! \n", __func__);
-		rc = i2c_master_recv(client, buf, bytes_to_recv);
-		return -EINVAL;
+	for (retry = 0; retry <= ELAN_I2C_RETRY; retry++) {
+		if (i2c_master_recv(client, buf, bytes_to_recv) == bytes_to_recv)
+			return bytes_to_recv;
+		if (retry == ELAN_I2C_RETRY) {
+			dev_err(&client->dev,
+				"[elan] %s: i2c_master_recv error?! \n", __func__);
+			(void) i2c_master_recv(client, buf, bytes_to_recv);
+			return -EINVAL;
+		} else
+			msleep(10);
 	}
 
-	return rc;
+	return -EINVAL;
 }
 
 static void elan_ktf3k_ts_report_data(struct i2c_client *client, uint8_t *buf)
